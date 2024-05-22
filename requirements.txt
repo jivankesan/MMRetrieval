@@ -1,0 +1,8 @@
+transformers
+Flask==2.1.1
+torch
+transformers==4.16.2
+faiss-cpu==1.7.1
+numpy==1.21.4
+pillow==8.4.0
+opencv-python==4.5.5.64
