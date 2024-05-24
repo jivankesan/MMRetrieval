@@ -16,7 +16,7 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 # Initialize Faiss index
 dimension = DIMENSION
 index = faiss.IndexFlatL2(dimension)
-vector_store = []  # To keep track of video metadata
+vector_store = [] 
 
 @app.route('/')
 def index():

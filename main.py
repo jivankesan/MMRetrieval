@@ -47,8 +47,6 @@ def segment_video(frame_dir, model, processor, interval=30):
     for i, frame in enumerate(frames[::interval]):
         frame_path = os.path.join(frame_dir, frame)
         outputs = analyze_frame(frame_path)
-        # Here, we assume `outputs` contains the necessary information to segment
-        # For illustration, we're just appending frame indices
         segments.append((i*interval, outputs))
     return segments
 
@@ -61,7 +59,7 @@ print(segments)
 # if cosine similarity > 80%
 
 def aggregate_segments(segments):
-    # Implement your aggregation logic based on your model's outputs
+    # Implement aggregation logic
     aggregated_segments = []
     current_segment = []
     for segment in segments:
@@ -92,7 +90,7 @@ if uploaded_file is not None:
     with open(video_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
     st.video(video_path)
-    # Process the video as shown in previous steps
+    
     extract_frames(video_path, output_dir)
     segments = segment_video(output_dir, model, processor)
     aggregated_segments = aggregate_segments(segments)
