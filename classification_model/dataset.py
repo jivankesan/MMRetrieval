@@ -67,22 +67,26 @@ def video_to_tensor(pic):
     return torch.from_numpy(pic.transpose([3,0,1,2]))
 
 
-def load_rgb_frames(frames):
+def load_rgb_frames_from_video(video_path, start_frame, num_frames, step):
+    cap = cv2.VideoCapture(video_path)
+    frames = []
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-  images = []
-  for i in frames:
-    img=cv2.imread(i)[:, :, [2, 1, 0]]
-    w,h,c = img.shape
-    if w < 224 or h < 224:
-        d = 224.-min(w,h)
-        sc = 1+d/min(w,h)
-        img = cv2.resize(img,dsize=(0,0),fx=sc,fy=sc)
-    images.append(img)
+    for i in range(num_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = cv2.resize(frame, (224, 224))
+        frames.append(frame)
+        for _ in range(step - 1):
+            ret = cap.grab()  # Skip frames to match the step size
 
-  images = np.asarray(images, dtype=np.float32)
-  images = (images/127.5) - 1
+    cap.release()
+    frames = np.asarray(frames, dtype=np.float32)
+    frames = (frames / 127.5) - 1
 
-  return images
+    return frames
 
 
 def load_flow_frames(image_dir, vid, start, num):
@@ -152,29 +156,21 @@ class Dataset(data_utl.Dataset):
 
     def __getitem__(self, index):
         vid, label, nf = self.data[index]
-        frame_indices = []
-        images = sorted(glob.glob(self.root + vid + "/*"))
-        n_frames = len(images)
+        video_path = os.path.join(self.root, vid + ".mp4")
+        n_frames = nf
 
         if n_frames > self.sample_duration * self.step:
-            start = randint(0, n_frames - self.sample_duration * self.step)
-            for i in range(start, start + self.sample_duration * self.step, self.step):
-                frame_indices.append(images[i])
-        elif n_frames < self.sample_duration:
-            while len(frame_indices) < self.sample_duration:
-                frame_indices.extend(images)
-            frame_indices = frame_indices[:self.sample_duration]
+            start_frame = randint(0, n_frames - self.sample_duration * self.step)
         else:
-            start = randint(0, n_frames - self.sample_duration)
-            for i in range(start, start + self.sample_duration):
-                frame_indices.append(images[i])
+            start_frame = 0
 
         if self.mode == 'rgb':
-            imgs = load_rgb_frames(frame_indices)
+            frames = load_rgb_frames_from_video(video_path, start_frame, self.sample_duration, self.step)
         else:
-            imgs = load_flow_frames(self.root, vid, start, 64)
+            #frames = load_flow_frames_from_video(video_path, start_frame, self.sample_duration, self.step)
+            return
 
-        return video_to_tensor(imgs), torch.from_numpy(label)
+        return video_to_tensor(frames), torch.from_numpy(label)
 
     def __len__(self):
         return len(self.data)
