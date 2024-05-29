@@ -1,83 +1,71 @@
 import os
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# os.environ["CUDA_VISIBLE_DEVICES"]='0,1,2,3'
 import argparse
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--mode', default='rgb', type=str, help='rgb or flow')
-parser.add_argument('--save_model', default='weights/', type=str)
-parser.add_argument('--root', default='', type=str)
-
-args = parser.parse_args()
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
-from torchvision import transforms
+
+from torchvision import datasets, transforms
 import videotransforms
+from utils import *
+
+from pytorch_i3d import InceptionI3d
 from dataset import *
-from timm.models import create_model
 
-# Function to get the available device
-def get_device():
-    if torch.cuda.is_available():
-        return torch.device('cuda')
-    elif torch.backends.mps.is_available():
-        return torch.device('mps')
-    else:
-        return torch.device('cpu')
 
-device = get_device()
-
-def run(init_lr=0.01, max_steps=100, mode='rgb', root='', batch_size=16, save_model='weights/'):
+def run(init_lr=0.01, max_steps=100, mode='rgb', root='../../', batch_size=16, save_model='weights/', protocol='CS'):
     # setup dataset
-    train_transforms = transforms.Compose([
-        videotransforms.CenterCrop(224),
-        transforms.ToTensor(),  # Add ToTensor transform to convert images to tensors
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalize as per Swin requirements
-    ])
-    
-    test_transforms = transforms.Compose([
-        videotransforms.CenterCrop(224),
-        transforms.ToTensor(),  # Add ToTensor transform to convert images to tensors
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalize as per Swin requirements
-    ])
+    train_transforms = transforms.Compose([videotransforms.CenterCrop(224)])
+    test_transforms = transforms.Compose([videotransforms.CenterCrop(224)])
+    original_protocol = protocol
+    if protocol == 'CS':
+       protocol = 'sub_'+protocol
+       num_classes = 31
+    else:
+       num_classes = 19
 
-    num_classes = 31
+    train_dataset = Dataset('./splits/train_cs.txt', 'train', root, "rgb", train_transforms, protocol)
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True, collate_fn=custom_collate_fn)
 
-    dataset = Dataset('./splits/train_cs.txt', 'train', root, 'rgb', train_transforms)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=36, pin_memory=True)
+    val_dataset = Dataset('./splits/validation_cs.txt', 'val', root, 'rgb', test_transforms, original_protocol)
+    val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=36, pin_memory=True, collate_fn = custom_collate_fn)    
 
-    val_dataset = Dataset('./splits/validation_cs.txt', 'val', root, 'rgb', test_transforms)
-    val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=36, pin_memory=True)    
-
-    dataloaders = {'train': dataloader, 'val': val_dataloader}
-    datasets = {'train': dataset, 'val': val_dataset}
+    dataloaders = {'train': train_dataloader, 'val': val_dataloader}
+    datasets = {'train': train_dataset, 'val': val_dataset}
     
     # setup the model
-    model = create_model('swin_base_patch4_window7_224', pretrained=True, num_classes=num_classes)
-    model.to(device)
-    model = nn.DataParallel(model)
+    if mode == 'flow':
+        i3d = InceptionI3d(400, in_channels=2)
+        i3d.load_state_dict(torch.load('models/flow_imagenet.pt'))
+    else:
+        i3d = InceptionI3d(400, in_channels=3)
+        i3d.load_state_dict(torch.load('models/rgb_imagenet.pt'))
+    i3d.replace_logits(num_classes)
+    
+    i3d.cuda()
+    i3d = nn.DataParallel(i3d)
 
     lr = init_lr
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    optimizer = optim.SGD(i3d.parameters(), lr=lr, momentum=0.9)
     lr_sched = optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=10, verbose=True)
 
+    num_steps_per_update = 1 # accum gradient
     steps = 0
     # train it
     while steps < max_steps:
-        print(f'Step {steps}/{max_steps}')
-        print('-' * 10)
+        print ('Step {}/{}'.format(steps, max_steps))
+        print ('-' * 10)
 
         # Each epoch has a training and validation phase
         for phase in ['train', 'val']:
             if phase == 'train':
-                model.train(True)
+                i3d.train(True)
             else:
-                model.train(False)  # Set model to evaluate mode
+                i3d.train(False)  # Set model to evaluate mode
 
             tot_loss = 0.0
+            tot_loc_loss = 0.0
             tot_cls_loss = 0.0
             tot_acc = 0.0
             num_iter = 0
@@ -90,32 +78,30 @@ def run(init_lr=0.01, max_steps=100, mode='rgb', root='', batch_size=16, save_mo
                 inputs, labels = data
 
                 # wrap them in Variable
-                inputs = Variable(inputs.to(device))
-                labels = Variable(labels.to(device))
+                inputs = Variable(inputs.cuda())
+                labels = Variable(labels.cuda())
 
-                outputs = model(inputs)
-                criterion = nn.CrossEntropyLoss().to(device)
-                cls_loss = criterion(outputs, torch.max(labels, dim=1)[1].long())
+                per_frame_logits = i3d(inputs)
+                criterion=nn.CrossEntropyLoss().cuda()
+                cls_loss = criterion(per_frame_logits, torch.max(labels, dim=1)[1].long())
                 tot_cls_loss += cls_loss.data
 
                 loss = cls_loss
                 tot_loss += loss.data
                 loss.backward()
-                acc = calculate_accuracy(outputs, torch.max(labels, dim=1)[1])
+                acc = calculate_accuracy(per_frame_logits, torch.max(labels, dim=1)[1])
                 tot_acc += acc
                 if phase == 'train':
                     optimizer.step()
-                    optimizer.zero_grad()
+                    optimizer.zero_grad()#lr_sched.step()
 
             if phase == 'train':
-                print(f'{phase} Cls Loss: {tot_cls_loss/num_iter:.4f} Tot Loss: {tot_loss/num_iter:.4f}, Acc: {tot_acc/num_iter:.4f}')
+                print ('{} Loc Loss: {:.4f} Cls Loss: {:.4f} Tot Loss: {:.4f}, Acc: {:.4f}'.format(phase, tot_loc_loss/num_iter, tot_cls_loss/num_iter, tot_loss/num_iter, tot_acc/num_iter))
                 # save model
-                torch.save(model.module.state_dict(), save_model+str(steps).zfill(6)+'.pt')
-                tot_loss = tot_cls_loss = tot_acc = 0.0
+                torch.save(i3d.module.state_dict(), save_model+str(steps).zfill(6)+'.pt')
+                tot_loss = tot_loc_loss = tot_cls_loss = tot_acc = 0.
                 steps += 1
             if phase == 'val':
                 lr_sched.step(tot_cls_loss/num_iter)
-                print(f'{phase} Cls Loss: {tot_cls_loss/num_iter:.4f} Tot Loss: {tot_loss/num_iter:.4f}, Acc: {tot_acc/num_iter:.4f}')
-
-if __name__ == '__main__':
-    run(mode=args.mode, root=args.root, batch_size=16, save_model=args.save_model)
+                print ('{} Loc Loss: {:.4f} Cls Loss: {:.4f} Tot Loss: {:.4f}, Acc: {:.4f}'.format(phase, tot_loc_loss/num_iter, tot_cls_loss/num_iter, (tot_loss*num_steps_per_update)/num_iter, tot_acc/num_iter))
+    
