@@ -1,9 +1,3 @@
-""" 
-i3d model from https://github.com/piergiaj/pytorch-i3d/blob/master/pytorch_i3d.py
-
-"""
-
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +9,12 @@ import os
 import sys
 from collections import OrderedDict
 
+class Flatten(nn.Module):
+    def __init__(self):
+        super(Flatten, self).__init__()
+
+    def forward(self, x):
+        return x.view(x.size(0), -1)
 
 class MaxPool3dSamePadding(nn.MaxPool3d):
     
@@ -306,7 +306,9 @@ class InceptionI3d(nn.Module):
                              use_batch_norm=False,
                              use_bias=True,
                              name='logits')
-
+        self.fc = None
+        #self.flatten = Flatten()
+        #self.fc = nn.Linear(7*self._num_classes, self._num_classes)
         self.build()
 
 
@@ -319,7 +321,8 @@ class InceptionI3d(nn.Module):
                              use_batch_norm=False,
                              use_bias=True,
                              name='logits')
-        
+        #self.flatten = Flatten() 
+        self.fc = nn.Linear(in_features=7*self._num_classes, out_features=self._num_classes)
     
     def build(self):
         for k in self.end_points.keys():
@@ -329,12 +332,18 @@ class InceptionI3d(nn.Module):
         for end_point in self.VALID_ENDPOINTS:
             if end_point in self.end_points:
                 x = self._modules[end_point](x) # use _modules to work with dataparallel
-
+                #print(end_point, x.shape)
         x = self.logits(self.dropout(self.avg_pool(x)))
-        if self._spatial_squeeze:
-            logits = x.squeeze(3).squeeze(3)
+        #print(x.shape)
+        #if self._spatial_squeeze:
+        #    logits = x.squeeze(3).squeeze(3)
+        #print(x.shape)
+        x = x.view(x.size(0), -1)
         # logits is batch X time X classes, which is what we want to work with
-        return logits
+        #print(y.shape)
+        x = self.fc(x)
+        #print(x.shape)
+        return x
         
 
     def extract_features(self, x):
